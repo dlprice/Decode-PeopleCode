@@ -1,0 +1,1691 @@
+!*******************************************************************************
+!  Program:     DECODEPC.SQR
+!*******************************************************************************
+!
+!  Programmer:  David L. Price (Ideatec, Inc.)
+!               www.ideatec.us
+!  Email:       david@ideatec.us
+!
+!*******************************************************************************
+!
+! This program was designed as a learning experiment to help me understand
+! better how PeopleSoft stored PeopleCode.  The only table that it INSERTs inot
+! or DELETEs from is DLP_PCODE (which it will create if not found).
+!
+! TO DO / KNOWN ISSUES:
+! * There are still only a very little bit of indenting logic.  Mostly just
+!   playing around trying to find out what works.  Most likely it needs to be
+!   removed and a new approach used.
+! * There are still several instances where line feeds aren't correct.  Such
+!   as where semi-colons are options (single statement 'if' blocks)
+! * Spacing is fairly good.  Semi-colons sometimes get an extra space before them.
+!
+!*******************************************************************************
+!                   SQR Modification Log
+!
+!    DATE      DESCRIPTION
+! ==========   ================================================================
+! 12-04-2004   Created for PeopleSoft 8.4x
+! 03-14-2005   Added Interactive selection mode.  Enter 'I' at prompt
+! 01-23-2006   Added additional command codes.  Fixed break when bad /missing
+!              PC is submitted.
+! 08-30-2006   Added 'legacy number' command code.  Still needs work.
+! 02-03-2010   Added block comment (0x55) and continue commmand (0x6e)
+! 03-11-2011   Added about 9 commands, mostly used in Application Packages.
+!              Made changes to the evaluate to handle the large number of breaks.
+!              Updated Legacy Number logic to better handle decimals.
+!              
+!
+!*******************************************************************************
+
+#define TRUE     1
+#define FALSE    0
+#define LAST_UPDATED 'March 11, 2011'
+
+#define SLICE_SIZE  2000             ! 2000 seems to be the maximum for ORACLE
+#define INDENT_SIZE 3
+#define MAX_OPTIONS 20
+
+!*******************************************************************************
+begin-program
+!*******************************************************************************
+
+move 'DECODEPC'            to $ReportID
+move 'PeopleCode Decoder'  to $ReportTitle
+do Init-Report
+
+while {TRUE}
+  do Prompt-User
+
+  let #EndOfCode = {FALSE}
+  let $CodeLine  = ''
+  let $Code      = ''
+
+  let $Indent    = '' ! +: Add one level, -: Remove one level, 0: Reset to zero
+  let #Indent    = 0
+
+  let #Program_Segment = 0
+  let #Program_Slice   = -1
+  do Stage-PeopleCode
+
+  if #Rows_Returned > 0
+
+    if #Output_To_File
+      do Open-File
+    end-if
+
+    ! Get rid of first 37 bytes.  PeopleCode header information.
+    ! We might do something with this later.
+    let #i = 0
+    while #i < 37
+      do NextByte(#tVal)
+      show #tVal edit 099 noline
+      show ' ' noline
+      add 1 to #i
+    end-while
+    show ' '
+
+    ! Program starts at byte 38
+    do NextByte(#tVal)
+    while not #end-file
+
+        let $SBefore = 'N'
+        !let $SAfter  = 'N'
+        ! 'Y' - Space Required
+        ! 'N' - Space Not Required
+        ! 'P' - Space Required, except next to punctuation: ().,;
+
+        do Evaluate-Return-Value
+        if #EndOfCode
+           break
+        end-if
+
+        do NextByte(#tVal)
+    end-while
+    do LineFeed
+
+    if #Output_To_File
+      close 1
+    end-if
+
+  end-if
+end-while
+
+end-program
+
+!*******************************************************************************
+begin-procedure Init-Report
+!*******************************************************************************
+
+do Get-Tools-Version($ToolsRel)
+do Get-Database-Name($DBName)
+
+show '------------------------------------------------------------------------'
+show $ReportTitle
+show {LAST_UPDATED}
+show 'by David L. Price (david@ideatec.us)'
+show 'Tools: ' $ToolsRel
+show 'Database: ' $DBName
+show '------------------------------------------------------------------------'
+show ' '
+
+date-time () MM/DD/YYYY  &ReportDate
+date-time () HH:MI       &ReportTime
+
+create-array name=Options size={MAX_OPTIONS}
+  field=Option:char
+
+create-array name=WhereClause size=16
+  field=Item:char
+
+evaluate $sqr-database
+   when = 'ORACLE'
+      let $Today = 'SYSDATE'
+      begin-sql
+      ALTER SESSION SET NLS_DATE_FORMAT='DD-MON-YYYY';
+      ALTER SESSION SET NLS_DATE_LANGUAGE='AMERICAN';
+      end-sql
+      break
+   when-other
+      show ' '
+      show '= = = = = = = = = E R R O R = = = = = = = = ='
+      show ' '
+      show 'Sorry.  PeopleSoft Page Information currently'
+      show 'only works on Oracle.'
+      show ' '
+      show '= = = = = = = = = = = = = = = = = = = = = = ='
+      stop quiet
+end-evaluate
+
+evaluate $ToolsRel
+   when = '8.4'
+      break
+   when-other
+      show ' '
+      show '= = = = = = = = = E R R O R = = = = = = = = ='
+      show ' '
+      show 'Sorry.  PeopleSoft Page Information currently'
+      show 'only works on PeopleTools version 8.1x or 8.4x. '
+      show ' '
+      show '= = = = = = = = = = = = = = = = = = = = = = ='
+      stop quiet
+end-evaluate
+
+let #Output_To_File = {FALSE}
+
+end-procedure
+
+!*******************************************************************************
+begin-procedure Open-File
+!*******************************************************************************
+! The record length needs to be longer than just a line since comments are stored
+! with built in linefeeds (0x0a).  I suppose I could have called LineFeed when
+! these were encountered, but I didn't.  Maybe later.
+
+let $FileName = 'c:\temp\' || nvl($ObjectName,'peoplecode') || '.pc'
+
+show 'Output to: ' $FileName
+
+open $FileName as 1
+   for-writing
+   record=10000:vary
+   status=#Open_Error
+
+if #Open_Error
+   show ' '
+   show '  *** Unable to open filename ***'
+   show ' '
+   stop
+end-if
+
+end-procedure
+
+!*******************************************************************************
+begin-procedure Evaluate-Return-Value
+!*******************************************************************************
+! This list is not conclusive.  There are still many gaps.  I can only assume
+! that every number has a meaning... but some of these could be for obsolete
+! commands and so no longer used.  Currently the will stop when it encounters an
+! unrecognized code.
+
+! Currently the pssqr.ini file delivered by PeopleSoft only allows for 75 breaks.
+! This, of course, could be increased, but to keep this as universally usable as
+! possible, I am breaking up the evaluate.
+
+if #tVal <= 60
+   evaluate #tVal
+       when = 1   ! 0x01
+           ! Variable Name
+           let $SBefore = 'P'
+           do Get-String($tString)
+           do WriteCode($tString)
+           let $SAfter  = 'P'
+           break
+       when = 3   ! 0x03
+           let $SBefore = 'N'
+           do WriteCode(',')
+           let $SAfter  = 'Y'
+           break
+       when = 4   ! 0x04
+           let $SBefore = 'Y'
+           do WriteCode('/')
+           let $SAfter  = 'Y'
+           break
+       when = 5   ! 0x05
+           let $SBefore = 'N'
+           do WriteCode('.')
+           let $SAfter  = 'N'
+           break
+       when = 6   ! 0x06
+           let $SBefore = 'Y'
+           do WriteCode('=')
+           let $SAfter  = 'Y'
+           break
+       when = 7   ! 0x07
+           ! End of Code
+           let #EndOfCode = {TRUE}
+           break
+       when = 8   ! 0x08
+           let $SBefore = 'Y'
+           do WriteCode('>=')
+           let $SAfter  = 'Y'
+           break
+       when = 9   ! 0x09
+           let $SBefore = 'Y'
+           do WriteCode('>')
+           let $SAfter  = 'Y'
+           break
+       when = 10  ! 0x0a
+           ! Function / Method / External Datatype / Class Name
+           let $SBefore = 'P'
+           do Get-String($tString)
+           do WriteCode($tString)
+           let $SAfter  = 'P'
+           break
+       when = 11  ! 0x0b
+           let $SBefore = 'N'
+           do WriteCode('(')
+           let $SAfter  = 'N'
+           break
+       when = 12  ! 0x0c
+           let $SBefore = 'Y'
+           do WriteCode('<=')
+           let $SAfter  = 'Y'
+           break
+       when = 13  ! 0x0d
+           let $SBefore = 'Y'
+           do WriteCode('<')
+           let $SAfter  = 'Y'
+           break
+       when = 14  ! 0x0e
+           let $SBefore = 'Y'
+           do WriteCode('-')
+           let $SAfter  = 'Y'
+           break
+       when = 15  ! 0x0f
+           let $SBefore = 'Y'
+           do WriteCode('*')
+           let $SAfter  = 'Y'
+           break
+       when = 16  ! 0x10
+           let $SBefore = 'Y'
+           do WriteCode('<>')
+           let $SAfter  = 'Y'
+           break
+       when = 17  ! 0x11
+           ! Number (Legacy?  no longer used?)
+           let $SBefore = 'P'
+           do Get-Legacy-Number($tVal)
+           do WriteCode($tVal)
+           let $SAfter  = 'P'
+           break
+       when = 18  ! 0x12
+           ! System Variable Name
+           let $SBefore = 'P'
+           do Get-String($tString)
+           do WriteCode($tString)
+           let $SAfter  = 'P'
+           break
+       when = 19  ! 0x13
+           let $SBefore = 'Y'
+           do WriteCode('+')
+           let $SAfter  = 'Y'
+           break
+       when = 20  ! 0x14
+           let $SBefore = 'N'
+           do WriteCode(')')
+           let $SAfter  = 'N'
+           break
+       when = 21  ! 0x15
+           let $SBefore = 'N'
+           do WriteCode(';')
+           do LineFeed
+           let $SAfter  = 'N'
+           break
+       when = 22  ! 0x16
+           ! Quoted Literal
+           let $SBefore = 'P'
+           do Get-String($tString)
+           let $tString = '"' || $tString || '"'
+           do WriteCode($tString)
+           let $SAfter  = 'P'
+           break
+       when = 24  ! 0x18
+           let $SBefore = 'Y'
+           do WriteCode('And')
+           do LineFeed
+           let $SAfter  = 'Y'
+           break
+       when = 25  ! 0x19
+           let $SBefore = 'Y'
+           do WriteCode('Else')
+           do LineFeed
+           let $SAfter  = 'Y'
+           break
+       when = 26  ! 0x1a
+           let $SBefore = 'Y'
+           let $Indent = '-'
+           do WriteCode('End-If')
+           let $SAfter  = 'Y'
+           break
+       when = 27  ! 0x1b
+           let $SBefore = 'Y'
+           do WriteCode('Error')
+           let $SAfter  = 'Y'
+           break
+       when = 28  ! 0x1c
+           let $SBefore = 'Y'
+           let $Indent = '+'
+           do WriteCode('If')
+           let $SAfter  = 'Y'
+           break
+       when = 29  ! 0x1d
+           let $SBefore = 'Y'
+           do WriteCode('Not')
+           let $SAfter  = 'Y'
+           break
+       when = 30  ! 0x1e
+           let $SBefore = 'Y'
+           do WriteCode('Or')
+           do LineFeed
+           let $SAfter  = 'Y'
+           break
+       when = 31  ! 0x1f
+           let $SBefore = 'Y'
+           do WriteCode('Then')
+           do LineFeed
+           let $SAfter  = 'Y'
+           break
+       when = 32  ! 0x20
+           let $SBefore = 'Y'
+           do WriteCode('Warning')
+           let $SAfter  = 'Y'
+           break
+       when = 33  ! 0x21
+           ! PeopleSoft object indicator (w/ Object name)
+           let $SBefore = 'P'
+           do NextByte(#Byte1)
+           do NextByte(#Byte2) ! could be the high order byte of NAMENUM
+           do Get-Object-Reference(#Byte1,$Recname, $Refname)
+           let $out = $Recname || '.' || $Refname
+           do WriteCode($out)
+           let $SAfter  = 'P'
+           break
+       when = 35  ! 0x23
+           let $SBefore = 'Y'
+           do WriteCode('|')
+           let $SAfter  = 'Y'
+           break
+       when = 36  ! 0x24
+           ! Comment
+           do NextByte(#lCommentLength1)
+           do NextByte(#lCommentLength2)
+           let #lCommentLength = (#lCommentLength2 * 256) + #lCommentLength1
+   
+           let #i = 0
+           while #i < #lCommentLength
+              do NextByte(#tVal)
+              let $out = chr(#tVal)
+              do WriteCode($out)
+              do NextByte(#tVal)
+              add 2 to #i
+           end-while
+           do LineFeed
+           break
+       when = 37  ! 0x25
+           let $SBefore = 'Y'
+           let $Indent = '+'
+           do WriteCode('While')
+           let $SAfter  = 'Y'
+           break
+       when = 38  ! 0x26
+           let $SBefore = 'Y'
+           let $Indent = '-'
+           do WriteCode('End-While')
+           let $SAfter  = 'Y'
+           break
+       when = 39  ! 0x27
+           let $SBefore = 'Y'
+           let $Indent = '+'
+           do WriteCode('Repeat')
+           do LineFeed
+           let $SAfter  = 'Y'
+           break
+       when = 40  ! 0x28
+           let $SBefore = 'Y'
+           let $Indent = '-'
+           do WriteCode('Until')
+           let $SAfter  = 'Y'
+           break
+       when = 41  ! 0x29
+           let $SBefore = 'Y'
+           do WriteCode('For')
+           let $SAfter  = 'Y'
+           break
+       when = 42  ! 0x2a
+           let $SBefore = 'Y'
+           do WriteCode('To')
+           let $SAfter  = 'Y'
+           break
+       when = 43  ! 0x2b
+           let $SBefore = 'Y'
+           do WriteCode('Step')
+           let $SAfter  = 'Y'
+           break
+       when = 44
+           let $SBefore = 'Y'
+           do WriteCode('End-For')
+           let $SAfter  = 'Y'
+           break
+       when = 45  ! 0x2d
+           ! Code Section Separator.  Not sure exactly what this is for,
+           ! so I am writing it out to maybe be able to spot a pattern
+           do WriteCode('<brk>')
+           ! do WriteCode('=====================================================================================')
+           do LineFeed
+           break
+       when = 46  ! 0x2e
+           let $SBefore = 'Y'
+           do WriteCode('Break')
+           let $SAfter  = 'Y'
+           break
+       when = 47  ! 0x2f
+           let $SBefore = 'Y'
+           do WriteCode('True')
+           let $SAfter  = 'Y'
+           break
+       when = 48  ! 0x30
+           let $SBefore = 'Y'
+           do WriteCode('False')
+           let $SAfter  = 'Y'
+           break
+       when = 49  ! 0x31
+           let $SBefore = 'Y'
+           do WriteCode('Declare')
+           let $SAfter  = 'Y'
+           break
+       when = 50  ! 0x32
+           let $SBefore = 'Y'
+           do WriteCode('Function')
+           let $SAfter  = 'Y'
+           break
+       when = 51  ! 0x33
+           let $SBefore = 'Y'
+           do WriteCode('Library')
+           let $SAfter  = 'Y'
+           break
+       when = 53  ! 0x35
+           let $SBefore = 'Y'
+           do WriteCode('As')
+           let $SAfter  = 'Y'
+           break
+       when = 54  ! 0x36
+           let $SBefore = 'Y'
+           do WriteCode('Value')
+           let $SAfter  = 'Y'
+           break
+       when = 55  ! 0x37
+           let $SBefore = 'Y'
+           do WriteCode('End-Function')
+           let $SAfter  = 'Y'
+           break
+       when = 56  ! 0x38
+           let $SBefore = 'Y'
+           do WriteCode('Return')
+           let $SAfter  = 'Y'
+           break
+       when = 57  ! 0x39
+           let $SBefore = 'Y'
+           do WriteCode('Returns')
+           let $SAfter  = 'Y'
+           break
+       when = 58  ! 0x3a
+           let $SBefore = 'Y'
+           do WriteCode('PeopleCode')
+           let $SAfter  = 'Y'
+           break
+       when = 59  ! 0x3b
+           let $SBefore = 'Y'
+           do WriteCode('Ref')
+           let $SAfter  = 'Y'
+           break
+       when = 60  ! 0x3c
+           let $SBefore = 'Y'
+           do WriteCode('Evaluate')
+           let $SAfter  = 'Y'
+           break
+       when-other
+           show ''
+           show '**************'
+           show 'CodeLine: ' $Codeline
+           show 'Unknown:'  #tVal
+           stop
+           break
+    end-evaluate
+    
+else  ! #tVal >= 61
+
+    evaluate #tVal   
+       when = 61  ! 0x3d
+           let $SBefore = 'Y'
+           do WriteCode('When')
+           let $SAfter  = 'Y'
+           break
+       when = 62  ! 0x3e
+           let $SBefore = 'Y'
+           do WriteCode('When-Other')
+           let $SAfter  = 'Y'
+           break
+       when = 63  ! 0x3f
+           let $SBefore = 'Y'
+           do WriteCode('End-Evaluate')
+           let $SAfter  = 'Y'
+           break
+       when = 64  ! 0x40
+           ! PeopleCode Variable Type Name
+           let $SBefore = 'P'
+           do Get-String($tString)
+           do WriteCode($tString)
+           let $SAfter  = 'P'
+           break
+       when = 65  ! 0x41
+           ! Parmlist
+           break
+       when = 66  ! 0x42
+           ! End Parmlist / End of Declare Statement
+           break
+       when = 67  ! 0x43
+           let $SBefore = 'Y'
+           do WriteCode('Exit')
+           let $SAfter  = 'Y'
+           break
+       when = 68  ! 0x44
+           let $SBefore = 'Y'
+           do WriteCode('Local')
+           let $SAfter  = 'Y'
+           break
+       when = 69  ! 0x45
+           let $SBefore = 'Y'
+           do WriteCode('Global')
+           let $SAfter  = 'Y'
+           break
+       when = 70  ! 0x46
+           let $SBefore = 'Y'
+           do WriteCode('**')
+           let $SAfter  = 'Y'
+           break
+       when = 71  ! 0x47
+           let $SBefore = 'N'
+           do WriteCode('@')
+           let $SAfter  = 'N'
+           break
+       when = 72  ! 0x48
+           ! PeopleSoft object indicator (w/ object name)
+           let $SBefore = 'P'
+           do NextByte(#Byte1)
+           do NextByte(#Byte2) ! could be the high order byte of namenum
+           do Get-Object-Reference(#Byte1,$Recname, $Refname)
+           let $out = $RecName || '."' || $Refname || '"'
+           do WriteCode($out)
+           let $SAfter  = 'P'
+           break
+       when = 73  ! 0x49
+           let $SBefore = 'Y'
+           do WriteCode('set')
+           let $SAfter = 'P'
+           break
+       when = 74  ! 0x4a
+           ! PeopleSoft object indicator (w/o object name)
+           let $SBefore = 'P'
+           do NextByte(#Byte1)
+           do NextByte(#Byte2) ! could be the high order byte of namenum
+           do Get-Object-Reference(#Byte1,$Recname, $Refname)
+           do WriteCode($Refname)
+           let $SAfter  = 'P'
+           break
+       when = 75  ! 0x4b
+           let $SBefore = 'Y'
+           do WriteCode('Null')
+           let $SAfter  = 'Y'
+           break
+       when = 76  ! 0x4c
+           let $SBefore = 'Y'
+           do WriteCode('[')
+           let $SAfter  = 'N'
+           break
+       when = 77  ! 0x4d
+           let $SBefore = 'N'
+           do WriteCode(']')
+           let $SAfter  = 'Y'
+           break
+       when = 78  ! 0x4e
+           ! Inline Code - Not really working since I have \n after certain commands
+           ! Comment
+           let $SBefore = 'Y'
+           do NextByte(#lCommentLength1)
+           do NextByte(#lCommentLength2)
+           let #lCommentLength = (#lCommentLength2 * 256) + #lCommentLength1
+   
+           let #i = 0
+           while #i < #lCommentLength
+              do NextByte(#tVal)
+              let $out = chr(#tVal)
+              do WriteCode($out)
+              do NextByte(#tVal)
+              add 2 to #i
+           end-while
+           let $SAfter = 'N'
+           do LineFeed
+           break
+       when = 79  ! 0x4f
+           ! Blank Line
+           do LineFeed
+           break
+       when = 80  ! 0x50
+           ! Number
+           let $SBefore = 'P'
+           do Get-Number($tVal)
+           do WriteCode($tVal)
+           let $SAfter  = 'P'
+           break
+       when = 81  ! 0x51
+           let $SBefore = 'Y'
+           do WriteCode('PanelGroup')
+           let $SAfter = 'Y'
+           break
+       when = 84  ! 0x54
+           let $SBefore = 'Y'
+           do WriteCode('Component')
+           let $SAfter = 'Y'
+           break
+       when = 85  ! 0x55
+           ! Block Comment <*  *>
+           do NextByte(#lCommentLength1)
+           do NextByte(#lCommentLength2)
+           let #lCommentLength = (#lCommentLength2 * 256) + #lCommentLength1
+   
+           let #i = 0
+           while #i < #lCommentLength
+              do NextByte(#tVal)
+              let $out = chr(#tVal)
+              do WriteCode($out)
+              do NextByte(#tVal)
+              add 2 to #i
+           end-while
+           do LineFeed
+           break
+       when = 86  ! 0x56
+           let $SBefore = 'Y'
+           do WriteCode('Constant')
+           let $SAfter = 'Y'
+           break
+       when = 87  ! 0x57
+           let $SBefore = 'N'
+           do WriteCode(':')
+           let $SAfter = 'N'
+           break
+       when = 88  ! 0x58
+           let $SBefore = 'Y'
+           do WriteCode('import')
+           let $SAfter = 'Y'
+           break
+       when = 89  ! 0x59
+           let $SBefore = 'N'
+           do WriteCode('*')
+           let $SAfter = 'N'
+           break
+       when = 90  ! 0x5a
+           let $SBefore = 'Y'
+           do WriteCode('class')
+           let $SAfter = 'Y'
+           break
+       when = 91  ! 0x5b
+           let $SBefore = 'Y'
+           do WriteCode('end-class')
+           let $SAfter = 'Y'
+           break
+       when = 92  ! 0x5c
+           let $SBefore = 'Y'
+           do WriteCode('extends')
+           let $SAfter = 'Y'
+           break
+       when = 93  ! 0x5d
+           let $SBefore = 'Y'
+           do WriteCode('out')
+           let $SAfter = 'P'
+           break
+       when = 94  ! 0x5e
+           let $SBefore = 'Y'
+           do WriteCode('property')
+           let $SAfter = 'Y'
+           break
+       when = 95  ! 0x5f
+           let $SBefore = 'Y'
+           do WriteCode('get')
+           let $After = 'P'
+           break
+       when = 96  ! 0x60
+           let $SBefore = 'Y'
+           do WriteCode('readonly')
+           let $After = 'P'
+           break
+       when = 97  ! 0x61
+           let $SBefore = 'Y'
+           do WriteCode('private')
+           do LineFeed
+           let $SAfter = 'Y'
+           break
+       when = 98  ! 0x62
+           let $SBefore = 'Y'
+           do WriteCode('instance')
+           let $SAfter = 'Y'
+           break
+       when = 99  ! 0x63
+           let $SBefore = 'Y'
+           do WriteCode('method')
+           let $SAfter = 'Y'
+           break
+       when = 100 ! 0x64
+           let $SBefore = 'Y'
+           do WriteCode('end-method')
+           let $SAfter = 'Y'
+           break
+       when = 101 ! 0x65
+           let $SBefore = 'Y'
+           do WriteCode('try')
+           do LineFeed
+           let $SAfter  = 'Y'
+           break
+       when = 102 ! 0x66
+           let $SBefore = 'Y'
+           do WriteCode('catch')
+           let $SAfter  = 'Y'
+           break
+       when = 103 ! 0x67
+           let $SBefore = 'Y'
+           do WriteCode('end-try')
+           let $SAfter  = 'Y'
+           break
+       when = 105 ! 0x69
+           let $SBefore = 'Y'
+           do WriteCode('create')
+           let $SAfter  = 'Y'
+           break
+       when = 106 ! 0x6a
+           let $SBefore = 'Y'
+           do WriteCode('end-get')
+           let $SAfter = 'Y'
+           break
+       when = 107 ! 0x6b
+           let $SBefore = 'Y'
+           do WriteCode('end-set')
+           let $SAfter = 'Y'
+           break
+       when = 109 ! 0x6d
+           let $SBefore = 'Y'
+           do WriteCode('/+ ')
+           do Get-String($tString)
+           do WriteCode($tString)
+           do WriteCode(' +/')
+           let $SAfter  = 'Y'
+           do LineFeed
+           break
+       when = 110 ! 0x6e
+           let $SBefore = 'Y'
+           do WriteCode('continue')
+           let $SAfter  = 'Y'
+           break
+       when = 111 ! 0x6f
+           let $SBefore = 'Y'
+           do WriteCode('abstract')
+           let $SAfter  = 'Y'
+           break
+       when = 115 ! 0x73
+           let $SBefore = 'Y'
+           do WriteCode('protected')
+           let $SAfter  = 'Y'
+           do LineFeed
+           break
+       when-other
+           show ''
+           show '**************'
+           show 'CodeLine: ' $Codeline
+           show 'Unknown:'  #tVal
+           stop
+           break
+   end-evaluate
+
+end-if
+
+end-procedure
+
+!*******************************************************************************
+begin-procedure Stage-PeopleCode
+!*******************************************************************************
+! PeopleSoft stores PeopleCode in a LONG RAW field.  Each field can only hold
+! 24000 bytes of code.  If the PeopleCode is longer than 24000 bytes, it will
+! be split up in multiple rows, indexed by the PROGSEQ field.
+!
+! When reading a LONG RAW field, SQR translates the binary data into text
+! representing the hex values.  However, SQR starts choking when the data gets
+! too big.  It seemed that the only hope I had was to deal with it in managable
+! size chunks, how I was unable to find any Oracle / SQR tricks to returns only a
+! substring of the LONG RAW field.  BLOBs were easier to work with, but I could
+! still not find a way to translate the LONG RAW into a BLOG on the fly.  My
+! solution was to create a temp table (if it didn't already exists), and copy
+! the LONG RAW into a BLOB field there, converting it using the to_lob function.
+! Now I can use the dbms_lob functions to return 2000 byte chunks.
+
+begin-sql on-error=Build-Temp-Table
+delete from DLP_PCODE
+end-sql
+
+begin-sql
+INSERT INTO dlp_pcode (progseq, progtxt)
+SELECT progseq, to_lob(progtxt)
+FROM pspcmprog
+WHERE [$WhereClause];
+end-sql
+
+let #Rows_Returned = #sql-Count
+
+if #Rows_Returned = 0
+  show '*** No program found ***'
+  show ' '
+  ! stop
+end-if
+
+Commit
+
+end-procedure
+
+!*******************************************************************************
+begin-procedure Build-Temp-Table
+!*******************************************************************************
+! Assumes the PTTBL tablesspace exists.  This can be changed to whatever.
+
+begin-sql
+CREATE TABLE DLP_PCODE (
+  PROGSEQ INTEGER,
+  PROGTXT blob)  tablespace pttbl
+  STORAGE (INITIAL 10000 NEXT 100000 MAXEXTENTS UNLIMITED PCTINCREASE 0)
+  PCTFREE 10 PCTUSED 80;
+end-sql
+
+end-procedure
+
+!*******************************************************************************
+begin-procedure NextByte (:#tVal)
+!*******************************************************************************
+! Pulls off the first two charaters from the $Code string that represent a
+! hexadecimal value and converts them to a numeric value.  If the $Code string
+! is empty (e.g., when all of the two byte values have been processed), it will
+! call the Get-Next-Segment function to return the next slice.
+
+while isblank($_Code)
+   do Get-Next-Segment($_Code)
+end-while
+let $tVal1 = substr($_Code,1,1)
+let $tVal2 = substr($_Code,2,1)
+let $_Code = substr($_Code,3,length($_Code))
+
+do HexToDec($tVal1)
+do HexToDec($tVal2)
+let #tVal = (16 * to_number($tVal1)) + to_number($tVal2)
+
+end-procedure
+
+!*******************************************************************************
+begin-procedure Get-Next-Segment (:$inCode)
+!*******************************************************************************
+! First increment the Slice to get the next 2000 bytes from the current Segment.
+! If there is no more data in the current Segment, check the next Segment,
+! starting with the first Slice (= 0).
+
+add 1 to #_Program_Slice
+
+! This is so that SQR doesn't complain if the table doesn't exist yet.
+! Procedure Build-Temp-Table will build the table if it doesn't exist.
+let $DLP_PCODE = 'DLP_PCODE'
+
+let $inCode = ''
+let #offset = ({SLICE_SIZE} * #_Program_Slice) + 1
+
+begin-select
+PROGSEQ
+Dbms_Lob.SubStr(PROGTXT,{SLICE_SIZE},#offset) &PROGTXT
+
+  let $inCode = &PROGTXT
+
+FROM [$DLP_PCODE]
+WHERE PROGSEQ = #_Program_Segment
+end-select
+
+if isnull(&PROGSEQ)
+   show '**ERROR** No additional code found'
+   show '   Program Name: ' $_ProgName
+   show '   Program Seg : ' #_Program_Segment
+   show '   PROGSEQ     : ' &PROGSEQ
+   stop
+end-if
+
+if isblank($inCode)
+   add 1 to #_Program_Segment
+   let #_Program_Slice = -1
+end-if
+
+end-procedure
+
+!*******************************************************************************
+begin-procedure HexToDec(:$in_char)
+!*******************************************************************************
+! Crude Hex to Decimal conversion
+
+let $TestChar = lower($in_char)
+evaluate $TestChar
+  when = 'a'
+     let $in_char = '10'
+     break
+  when = 'b'
+     let $in_char = '11'
+     break
+  when = 'c'
+     let $in_char = '12'
+     break
+  when = 'd'
+     let $in_char = '13'
+     break
+  when = 'e'
+     let $in_char = '14'
+     break
+  when = 'f'
+     let $in_char = '15'
+     break
+end-evaluate
+
+end-procedure
+
+!*******************************************************************************
+begin-procedure WriteCode($inChar)
+!*******************************************************************************
+! Seperate function so I can expand the functionality.  I think I am going
+! to have to do something here to get the spacing right.
+
+let $LastChar = substr($_CodeLine,length($_CodeLine),1)
+
+if $_CodeLine <> ''
+  if ($_SAfter = 'Y' and $LastChar <> ' ') or
+     ($_SAfter = 'P' and instr(' ().;,[]', substr($inChar,1,1), 0) = 0)
+    let $_CodeLine = $_CodeLine || ' '
+    let $LastChar = ' '
+  end-if
+
+  if ($_SBefore = 'Y' and $LastChar <> ' ') or
+     ($_SBefore = 'P' and instr(' ().;,[]', $LastChar, 0) = 0)
+    let $_CodeLine = $_CodeLine || ' '
+  end-if
+end-if
+
+let $_CodeLine = $_CodeLine || $inChar
+
+let $_SAfter  = 'N'
+let $_SBefore = 'N'
+
+end-procedure
+
+!*******************************************************************************
+begin-procedure LineFeed
+!*******************************************************************************
+
+if $Indent = '-'
+   subtract {INDENT_SIZE} from #Indent
+end-if
+
+if $Indent = '0'
+   let #Indent = 0
+end-if
+
+let $out = lpad('', #Indent, ' ')
+let $CodeLine = $out || $CodeLine
+
+if #Output_To_File
+  write 1 from $CodeLine
+else
+  show $CodeLine
+end-if
+
+if $Indent = '+'
+   add {INDENT_SIZE} to #Indent
+end-if
+
+let $CodeLine = ''
+let $Indent = ''
+
+end-procedure
+
+!*******************************************************************************
+begin-procedure Get-String(:$out_String)
+!*******************************************************************************
+! PeopleCode strings characters are stored as two byte characters.  With the
+! standard ASCII, only the first byte is used.  I have not bothered trying to
+! support this yet since we are using just ASCII.  I am reading the first byte,
+! and then just junking the second byte (reading, but doing nothing).
+
+let $out_String = ''
+do NextByte(#tVal)
+while #tVal <> 0
+   let $out_String = $out_String || chr(#tVal)
+   do NextByte(#tVal) ! Junk 00 byte
+   do NextByte(#tVal)
+end-while
+do NextByte(#tVal) ! Junk 00 byte
+
+end-procedure
+
+!*******************************************************************************
+begin-procedure Get-Number(:$out_Number)
+!*******************************************************************************
+! This doesn't seem to be able to handle very large numbers.  For example,
+! in my PeopleCode program I have 312345678901234567890123456789012, but this
+! function returns the value      312345678901235007690186929282860.  Not sure
+! why the rounding issue.  Maybe an SQR limitation?  SQR is supposed to be able
+! to handle large values.  Need to look into later.  Fortunetly we don't deal
+! with numbers this large in HR very often.
+
+declare-variable
+  decimal #tValue(37)
+end-declare
+
+let #tValue = 0.0
+
+! Not sure what the first bytes is for.  So far it is always
+! 0x000. It is not used for negative.  Chomp for now.
+do NextByte(#tVal)
+
+do NextByte(#Decimal)
+
+! Numbers are stored Low Order first
+let #i = 0
+while #i < 16
+   do NextByte(#tVal)
+   let #tValue = #tValue + ( ( 256 ^ #i ) * #tVal )
+   ! show #i edit 99 noline
+   ! show ': ' #tVal edit 99 noline
+   ! show '= ' #tValue
+   add 1 to #i
+end-while
+
+let #tValue = #tValue / (10 ^ #Decimal)
+
+let $out_number = to_char(#tValue)
+
+end-procedure
+
+!*******************************************************************************
+begin-procedure Get-Legacy-Number(:$out_Number)
+!*******************************************************************************
+! Code 0x11 (17) seems to be only used in older code.  Any attempts to
+! recreated this generates an 0x50 (80)... which is the regular number.
+! Without multiple examples, it is next to impossible to determine how this is
+! stored.  Until I can, I will list examples here.
+!
+! 11 0000 0000 8000 0000 0000 0000 0000 = 128
+! 11 0000 0000 0100 0000 0000 0000 0000 = 1
+! 11 0000 0200 9f86 0100 0000 0000 0000 = 999.99
+
+declare-variable
+  decimal #tValue(37)
+end-declare
+
+let #tValue = 0.0
+let #Decimal = 0
+
+! Assume it is something like the current number..
+
+! Skipping first 2 bytes... not sure what they are for.
+do NextByte(#tVal)
+if #tVal <> 0
+  show ''
+  show '***************'
+  show 'Legacy Number: First byte non-zero'
+  show 'tVal = ' #tVal
+  show 'CodeLine = ' $_CodeLine
+  stop
+end-if
+
+do NextByte(#tVal)
+if #tVal <> 0
+  show ''
+  show '***************'
+  show 'Legacy Number: Second byte non-zero'
+  show 'tVal = ' #tVal
+  show 'CodeLine = ' $_CodeLine
+  stop
+end-if
+
+! Decimal precision seems to be stored in the 3rd byte.  Might also
+! be using the 4th byte, however that would required more than 256
+! values after the decimal.  Not sure that happens often.
+do NextByte(#Decimal)
+
+! Skipping fourth byte... not sure what it is for. 
+do NextByte(#tVal)
+if #tVal <> 0
+  show ''
+  show '***************'
+  show 'Legacy Number: Fourth byte non-zero'
+  show 'tVal = ' #tVal
+  show 'CodeLine = ' $_CodeLine
+  stop
+end-if
+
+! Numbers are stored Low Order first
+let #i = 0
+while #i < 10
+   do NextByte(#tVal)
+   let #tValue = #tValue + ( ( 256 ^ #i ) * #tVal )
+   ! show #i edit 99 noline
+   ! show ': ' #tVal edit 99 noline
+   ! show '= ' #tValue
+   add 1 to #i
+end-while
+
+let #tValue = #tValue / (10 ^ #Decimal)
+
+let $out_number = to_char(#tValue)
+
+! I'm pretty confident about these values... so I will let them pass.
+! Anything outside of this range should be examined.  Will remove this
+! section if I ever get a better understanding of these numbers
+if #tValue < 0 or #tValue > 20010
+   show ''
+   show '**************'
+   show 'New Legacy Number found'
+   show 'Calculated at:'  #tValue
+   stop
+end-if
+
+end-procedure
+
+!*******************************************************************************
+begin-procedure Get-Object-Reference(#in_NameNum,:$out_Recname,:$out_Refname)
+!*******************************************************************************
+! For some reason, the number referenced in the PeopleCode is one less than
+! the NAMENUM.  Hense the '+1' in the WHERE clause.
+
+let $out_Recname = 'Unknown'
+let $out_Refname = 'Unknown'
+
+begin-select
+RECNAME
+REFNAME
+
+   let $out_Recname = &RECNAME
+   let $out_RefName = &REFNAME
+
+from PSPCMNAME
+where [$_WhereClause]
+and   NAMENUM = #in_NameNum + 1
+end-select
+
+end-procedure
+
+!*******************************************************************************
+begin-procedure Get-Tools-Version(:$ToolsRel)
+!*******************************************************************************
+! Valid Return values: pre-7, 7, 7.5, 8, 8.4
+
+! This is not really used in this program.  I use this when trying to write
+! something for mulitple version.  See PAGEINFO.sqr, for example.
+
+let $ToolsVersionTable = ''
+let $ToolsRel = ''
+
+begin-select
+RECNAME
+
+  let $ToolsVersionTable = &RECNAME
+
+from PSRECFIELD
+where FIELDNAME = 'TOOLSREL'
+and RECNAME in ('PSLOCK','PSSTATUS')
+end-select
+
+if not isblank($ToolsVersionTable)
+begin-select
+TOOLSREL
+
+  let $ToolsRel = &TOOLSREL
+
+from [$ToolsVersionTable]
+end-select
+end-if
+
+let #ToolsRel = to_number($ToolsRel)
+
+evaluate #ToolsRel
+   when < 7
+      let $ToolsRel = 'pre-7'
+      break
+   when < 7.5
+      let $ToolsRel = '7'
+      break
+   when < 8
+      let $ToolsRel = '7.5'
+      break
+   when < 8.4
+      let $ToolsRel = '8'
+      break
+   when < 9
+      let $ToolsRel = '8.4'
+      break
+end-evaluate
+
+end-procedure
+
+!*******************************************************************************
+begin-procedure Get-Database-Name(:$DBName)
+!*******************************************************************************
+
+let $DBName = 'Unknown'
+
+! Get Database Name
+begin-select loops=1
+DBNAME
+
+  let $DBName = &DBNAME
+
+from ps.psdbowner
+where upper(OWNERID) = upper($_username)
+end-select
+
+end-procedure
+
+!*******************************************************************************
+begin-procedure Prompt-User
+!*******************************************************************************
+! Basic usage is that you enter the object list of where the peoplecode resides,
+! separating each object with a period.
+! Examples: JOB.EMPLID.SaveEdit
+!
+! Alternate prompt values:
+!   . = Skip importing PeopleCode
+!   / = Set options
+!   > = Interactive Mode
+!
+
+The_Beginning:
+
+let $WhereClause  = ''
+
+input $InputMask 'Enter Search (''?'' for insturctions)'
+if isblank($InputMask)
+   show ' '
+   show 'Ending Program.'
+   stop quiet
+end-if
+
+! uppercase $InputMask
+let $TestChar = substr($InputMask,1,1)
+evaluate $TestChar
+when = '>'
+   do Interactive-Mode ($ObjectName, $WhereClause)
+   break
+when = '.'
+   ! Skip Importing PeopleCode.  This will run whatever
+   ! is already in staging table.
+   let $WhereClause = ''
+   break
+!when = '@'
+!   do Process-FileList
+!   if isblank($WhereClause)
+!      goto The_Beginning
+!   end-if
+!   break
+!when = '?'
+!   do Show-Instructions
+!   goto The_Beginning
+!   break
+when = '/'
+   ! Configuration Options
+   let $InputMask = ltrim($InputMask, '/')
+   evaluate $InputMask
+   when = '*'
+      show ' '
+      show '  == Current Settings =='
+      show '  Output to File      : ' noline
+      do Show-True-Or-False(#Output_To_File)
+      !show '  Print Field Numbers : ' noline
+      !do Show-True-Or-False(#Print_Field_Num)
+      show ' '
+      break
+   when = 'O'
+      let #Output_To_File = not #Output_To_File
+      show ' '
+      if #Output_To_File
+         show '=== Output To File ==='
+      else
+         show '=== Output To Screen ==='
+      end-if
+      show ' '
+      break
+   !when = 'F'
+   !   let #Print_Field_Num = not #Print_Field_Num
+   !   show ' '
+   !   if #Print_Field_Num
+   !      show '=== Print Field Number ==='
+   !   else
+   !      show '=== Supress Field Number ==='
+   !   end-if
+   !   show ' '
+   !   break
+   when-other
+      show ' '
+      show ' *** Valid Options ***'
+      show ' /O = Toggle Output Destination'
+      show ' /* = List Option values'
+      show ' '
+      break
+   end-evaluate
+   goto The_Beginning
+   break
+when-other
+   unstring $InputMask
+      by '.'
+      into $ObjectValue1
+           $ObjectValue2
+           $ObjectValue3
+           $ObjectValue4
+           $ObjectValue5
+           $ObjectValue6
+           $ObjectValue7
+
+   let $ObjectValue1 = nvl(ltrim(rtrim($ObjectValue1,' '),' '),' ')
+   let $ObjectValue2 = nvl(ltrim(rtrim($ObjectValue2,' '),' '),' ')
+   let $ObjectValue3 = nvl(ltrim(rtrim($ObjectValue3,' '),' '),' ')
+   let $ObjectValue4 = nvl(ltrim(rtrim($ObjectValue4,' '),' '),' ')
+   let $ObjectValue5 = nvl(ltrim(rtrim($ObjectValue5,' '),' '),' ')
+   let $ObjectValue6 = nvl(ltrim(rtrim($ObjectValue6,' '),' '),' ')
+   let $ObjectValue7 = nvl(ltrim(rtrim($ObjectValue7,' '),' '),' ')
+
+   let $WhereClause = 'OBJECTVALUE1 = ''' || $ObjectValue1 || ''' and ' ||
+                      'OBJECTVALUE2 = ''' || $ObjectValue2 || ''' and ' ||
+                      'OBJECTVALUE3 = ''' || $ObjectValue3 || ''' and ' ||
+                      'OBJECTVALUE4 = ''' || $ObjectValue4 || ''' and ' ||
+                      'OBJECTVALUE5 = ''' || $ObjectValue5 || ''' and ' ||
+                      'OBJECTVALUE6 = ''' || $ObjectValue6 || ''' and ' ||
+                      'OBJECTVALUE7 = ''' || $ObjectValue7 || ''''
+
+   let $ObjectName = rtrim($ObjectValue1 || '.' ||
+                           $ObjectValue2 || '.' ||
+                           $ObjectValue3 || '.' ||
+                           $ObjectValue4 || '.' ||
+                           $ObjectValue5 || '.' ||
+                           $ObjectValue6 || '.' ||
+                           $ObjectValue7  , '. ')
+   break
+end-evaluate
+
+show ' '
+show 'Processing....'
+
+end-procedure
+
+!*******************************************************************************
+begin-procedure Show-True-Or-False(#in_evaluate)
+!*******************************************************************************
+
+if #in_evaluate
+  show 'YES'
+else
+  show 'NO'
+end-if
+
+end-procedure
+
+!*******************************************************************************
+begin-procedure Interactive-Mode (:$ObjectName, :$WhereClause)
+!*******************************************************************************
+! Trying to remember the name of a PeopleCode object isn't so bad when you are
+! only talking about Record PeopleCode, but it gets much worse when working with
+! App Engines.  I throw this "Interactive Mode" together to (1) help me find
+! PeopleCode, and (2) to play with some ideas I had.
+
+! PeopleCode is stored in as seven paired values.  Each pair drills down deeper
+! to identify the specific PeopleCode object.  Some PeopleCode types only require
+! three pairs (RecField PeopleCode, for example, only needs Record name, Field
+! name, and PeopleCode Type), while others require all seven (i.e., Application
+! Engine PeopleCode).  The first value in each pair represents an Object Type
+! (Record, Page, Component, etc.), the second is the Object Name.
+
+! This program cycles through each field (7 pairs x 2 per pair = 14 fields),
+! assisting the user along the way.  If there is only one value value (determined
+! by a SELECT UNIQUE), that value is used.  If there are less than MAX_OPTIONS
+! choices, the user will be presented with a list to choose from.  If there are
+! more, the user will be prompted to enter a object mask (i.e., JOB%) to limit
+! the number returned until less than MAX_OPTIONS are found.
+
+show '================'
+show 'Interactive Mode'
+show '================'
+
+let $WhereClause = ''
+let $ObjectMask  = ''
+let $Current_ID_Type = ''
+let $ObjectName = ''
+clear-array name=WhereClause
+
+let #i = 1
+while #i <= 7
+  let #j = 1
+  while #j <= 2
+    if #j = 1
+       let $ObjectType = 'ID'
+    else
+       let $ObjectType = 'VALUE'
+    end-if
+
+    do Select-Values(#i, $ObjectType, $ObjectMask, #Num_Returned)
+    let $ObjectMask = ''
+    if #j = 1
+      ! nothing
+    else
+      let $Current_ID_Type = WhereClause.Item(( (#i - 1) * 2 )+ 1)
+      do GetObjectType($Current_ID_Type, $Current_ID_Type)
+    end-if
+
+    evaluate #Num_Returned
+      when = 0
+         show ' '
+         show 'No ' $Current_ID_Type ' objects found with that mask.'
+         show 'Re-enter ' $Current_ID_Type ' mask to broaden ' noline
+         input $ObjectMask 'search'
+         break
+      when = 1
+         let WhereClause.Item(((#i - 1) * 2) + #j) = Options.Option(0)
+         if #j = 2 and $Current_ID_Type <> '0'
+           let $ObjectName = $ObjectName || Options.Option(0) || '.'
+           show ' '
+           show 'Only 1 ' $Current_ID_Type ' found: ' $ObjectName
+         end-if
+         add 1 to #j
+         break
+      when <= {MAX_OPTIONS}
+         while {TRUE}
+            show ' '
+            if #j = 1
+              show 'Select PeopleCode Type:'
+            else
+              show 'Select ' $Current_ID_Type ' name:'
+            end-if
+            let #k = 0
+            while #k < #Num_Returned
+               show #k edit 999 noline
+               show ') ' noline
+               let $out = Options.Option(#k)
+               if #j = 1
+                 do GetObjectType($out,$out)
+               end-if
+               show $out
+               add 1 to #k
+            end-while
+            input $InputMask 'Enter Choice'
+            let $InputMask = rtrim(ltrim($InputMask,' '),' ')
+            if isnull(rtrim($InputMask,'0123456789'))
+              if to_number($InputMask) < #Num_Returned
+                break
+              end-if
+            end-if
+            show ' '
+            show '** Invalid option.  Please choose again.'
+         end-while
+         let WhereClause.Item(((#i - 1) * 2) + #j) = Options.Option(to_number($InputMask))
+         if #j = 1
+           ! Do Nothing
+         else
+           let $ObjectName = $ObjectName || Options.Option(to_number($InputMask)) || '.'
+         end-if
+         add 1 to #j
+         break
+      when-other
+         show ' '
+         show 'More than {MAX_OPTIONS} ' $Current_ID_Type ' objects found.'
+         show 'Enter ' $Current_ID_Type ' mask to narrow ' noline
+         input $ObjectMask 'search'
+         break
+    end-evaluate
+  end-while
+  add 1 to #i
+end-while
+
+do Build-WhereClause (7, 2, $WhereClause)
+let $ObjectName = rtrim($ObjectName, '. ')
+
+end-procedure
+
+!*******************************************************************************
+begin-procedure Select-Values (#IDIndex, $ObjectType, $ObjectMask, :#Num_Returned)
+!*******************************************************************************
+! #IDIndex = 1..7
+! $ObjectType: ID or VALUE
+
+clear-array name=Options
+
+! Build Where clause up to before the current field.
+if $ObjectType = 'ID'
+  let #out = #IDIndex - 1
+  do Build-WhereClause(#out, 2, $WhereClause)
+  let $Field = 'to_char(OBJECTID' || edit(#IDIndex,'9') || ')'
+else
+  do Build-WhereClause (#IDIndex, 1, $WhereClause)
+  let $Field = 'OBJECTVALUE' || edit(#IDIndex,'9')
+end-if
+
+if not isblank($ObjectMask)
+  let $WhereClause = $WhereClause || ' and OBJECT' || $ObjectType || edit(#IDIndex,'9') || ' like ''' || $ObjectMask || ''''
+end-if
+
+let #Num_Returned = 0
+begin-select distinct
+[$Field]  &rf=char
+
+   if #Num_Returned < {MAX_OPTIONS}
+     let Options.Option(#Num_Returned) = &rf
+   end-if
+   add 1 to #Num_Returned
+
+FROM pspcmprog
+where [$WhereClause]
+end-select
+
+end-procedure
+
+!*******************************************************************************
+begin-procedure Build-WhereClause (#MaxJ, #MaxK, :$WhereClause)
+!*******************************************************************************
+! j = Index
+! k = Type
+
+let $WhereClause = ''
+
+let #j = 1
+while #j <= #MaxJ
+  let #k = 1
+  while (#k <= 2 and #j < #MaxJ) or #k <= #MaxK
+    if not isblank($WhereClause )
+      let $WhereClause = $WhereClause || ' and '
+    end-if
+    if #k = 1
+      let $WhereObject = 'ID'
+    else
+      let $WhereObject = 'VALUE'
+    end-if
+    let $WhereClause = $WhereClause || 'OBJECT' || $WhereObject || edit(#j,'9') || ' = ''' || WhereClause.Item(((#j - 1) * 2) + #k) || ''''
+    add 1 to #k
+  end-while
+  add 1 to #j
+end-while
+
+if isblank($WhereClause)
+  let $WhereClause = '1=1'
+end-if
+
+end-procedure
+
+!*******************************************************************************
+begin-procedure GetObjectType($in, :$out)
+!*******************************************************************************
+! There are additional object types that are not in this list, but this seems
+! to be all of the ones used as PeopleCode types.  This list might need to
+! be expanded later.
+
+evaluate $in
+  when = '1'
+    let $out = 'Record'
+    break
+  when = '2'
+    let $out = 'Field'
+    break
+  when = '3'
+    let $out = 'Menu'
+    break
+  when = '4'
+    let $out = 'Bar'
+    break
+  when = '5'
+    let $out = 'Menu Item'
+    break
+  when = '9'
+    let $out = 'Page'
+    break
+  when = '10'
+    let $out = 'Component'
+    break
+  when = '12'
+    let $out = 'PeopleCode Type'
+    break
+  when = '20'
+    let $out = 'Platform'
+    break
+  when = '21'
+    let $out = 'Effective Date'
+    break
+  when = '39'
+    let $out = 'Market'
+    break
+  when = '60'
+    let $out = 'Message'
+    break
+  when = '66'
+    let $out = 'Application Engine'
+    break
+  when = '74'
+    let $out = 'Component Interface'
+    break
+  when = '77'
+    let $out = 'Application Section'
+    break
+  when = '78'
+    let $out = 'Step'
+    break
+  when = '104'
+    let $out = 'Application Package'
+    break
+  when = '105'
+    let $out = '2nd Level Application Package'
+    break
+  when = '106'
+    let $out = '3rd Level Application Package'
+    break
+  when = '107'
+    let $out = 'Application Class'
+    break
+  when-other
+    let $out = $in
+    break
+end-evaluate
+
+end-procedure
+
+
+
