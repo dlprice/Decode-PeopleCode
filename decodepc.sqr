@@ -40,7 +40,11 @@
 !              modify the WHERE clause to adjust output.  
 !              Added ability to skip writing file if it already exists (on by default)
 !              Added some additional commands found in 8.51 (implements)
-!              Strips invalid characters from filenmae
+!              Strips invalid characters from filename
+! 11-04-2011   Changes to indention logic.
+!              Added two more commands per user request: 0x70 (interface) & 0x71 (end-interface)
+!              Added 0x6c (Data Type)
+!              
 !
 !*******************************************************************************
 
@@ -62,7 +66,7 @@ do Init-Report
 ! Initialize Settings
 let #Output_To_File = {TRUE}
 let #Skip_If_Exists = {TRUE}
-let $Output_Directory = 'c:\temp\'
+let $Output_Directory = 'c:\pcode\'
 
 
 begin-select distinct
@@ -147,7 +151,8 @@ OBJECTVALUE7
    end-if
 
 from pspcmprog
-where lastupdoprid <> 'PPLSOFT'          ! All custom or customized PeopleCode
+! where lastupdoprid <> 'PPLSOFT'          ! All custom or customized PeopleCode
+order by 1,2,3,4,5,6,7
 end-select
 
 
@@ -188,7 +193,7 @@ evaluate $sqr-database
       show ' '
       show '= = = = = = = = = E R R O R = = = = = = = = ='
       show ' '
-      show 'Sorry.  PeopleSoft Page Information currently'
+      show 'Sorry.  Decode PeopleCode has currently'
       show 'only works on Oracle.'
       show ' '
       show '= = = = = = = = = = = = = = = = = = = = = = ='
@@ -202,7 +207,7 @@ evaluate $ToolsRel
       show ' '
       show '= = = = = = = = = E R R O R = = = = = = = = ='
       show ' '
-      show 'Sorry.  PeopleSoft Page Information currently'
+      show 'Sorry.  Decode PeopleCode currently'
       show 'only works on PeopleTools version 8.1x or 8.4x. '
       show ' '
       show '= = = = = = = = = = = = = = = = = = = = = = ='
@@ -385,14 +390,14 @@ if #tVal <= 60
           break
       when = 25  ! 0x19
           let $SBefore = 'Y'
-          let $Indent = '-+'
+          do SetIndent('-+')
           do WriteCode('Else')
           do LineFeed
           let $SAfter  = 'Y'
           break
       when = 26  ! 0x1a
           let $SBefore = 'Y'
-          let $Indent = '-'
+          do SetIndent('-')
           do WriteCode('End-If')
           let $SAfter  = 'P'
           !do LineFeed  ! Should have a semi-colon and not require a linefeed
@@ -404,7 +409,7 @@ if #tVal <= 60
           break
       when = 28  ! 0x1c
           let $SBefore = 'Y'
-          let $Indent = '+'
+          do SetIndent('+')
           do WriteCode('If')
           let $SAfter  = 'Y'
           break
@@ -466,32 +471,32 @@ if #tVal <= 60
           break
       when = 37  ! 0x25
           let $SBefore = 'Y'
-          let $Indent = '+'
+          do SetIndent('+')
           do WriteCode('While')
           let $SAfter  = 'Y'
           break
       when = 38  ! 0x26
           let $SBefore = 'Y'
-          let $Indent = '-'
+          do SetIndent('-')
           do WriteCode('End-While')
           let $SAfter  = 'Y'
           break
       when = 39  ! 0x27
           let $SBefore = 'Y'
-          let $Indent = '+'
+          do SetIndent('+')
           do WriteCode('Repeat')
           do LineFeed
           let $SAfter  = 'Y'
           break
       when = 40  ! 0x28
           let $SBefore = 'Y'
-          let $Indent = '-'
+          do SetIndent('-')
           do WriteCode('Until')
           let $SAfter  = 'Y'
           break
       when = 41  ! 0x29
           let $SBefore = 'Y'
-          let $Indent = '+'
+          do SetIndent('+')
           do WriteCode('For')
           let $SAfter  = 'Y'
           break
@@ -507,7 +512,7 @@ if #tVal <= 60
           break
       when = 44
           let $SBefore = 'Y'
-          let $Indent = '-'
+          do SetIndent('-')
           do WriteCode('End-For')
           let $SAfter  = 'Y'
           break
@@ -534,13 +539,14 @@ if #tVal <= 60
           let $SAfter  = 'Y'
           break
       when = 49  ! 0x31
+          do SetIndent('0')
           let $SBefore = 'Y'
           do WriteCode('Declare')
           let $SAfter  = 'Y'
           break
       when = 50  ! 0x32
           let $SBefore = 'Y'
-          let $Indent = '+'
+          do SetIndent('+')
           do WriteCode('Function')
           let $SAfter  = 'Y'
           break
@@ -561,9 +567,9 @@ if #tVal <= 60
           break
       when = 55  ! 0x37
           let $SBefore = 'Y'
-          let $Indent = '-'
+          do SetIndent('-')
           do WriteCode('End-Function')
-          let $SAfter  = 'Y'
+          let $SAfter  = 'P'
           break
       when = 56  ! 0x38
           let $SBefore = 'Y'
@@ -866,6 +872,13 @@ else  ! #tVal >= 61
            do WriteCode('end-set')
            let $SAfter = 'Y'
            break
+       when = 108 ! 0x6c
+           ! Data Type
+           let $SBefore = 'Y'
+           do Get-String($tString)
+           do WriteCode($tString)
+           let $SAfter = 'Y'
+           break           
        when = 109 ! 0x6d
            let $SBefore = 'Y'
            do WriteCode('/+ ')
@@ -884,6 +897,16 @@ else  ! #tVal >= 61
            let $SBefore = 'Y'
            do WriteCode('abstract')
            let $SAfter  = 'Y'
+           break
+       when = 112 ! 0x70
+           let $SBefore = 'Y'
+           do WriteCode('interface')
+           let $SAfter = 'Y'
+           break
+       when = 113 ! 0x71
+           let $SBefore = 'Y'
+           do WriteCode('end-interface')
+           let $SAfter = 'Y'
            break
        when = 114 ! 0x72
            let $SBefore = 'Y'
@@ -1054,6 +1077,18 @@ evaluate $TestChar
 end-evaluate
 
 end-procedure
+
+!*******************************************************************************
+begin-procedure SetIndent($inChar) 
+!*******************************************************************************
+! Rudimentary Indenting logic.  Probably will expand later.
+
+if $_Indent <> '0' 
+  let $_Indent = $inChar
+end-if
+
+end-procedure
+
 
 !*******************************************************************************
 begin-procedure WriteCode($inChar)
@@ -1256,7 +1291,7 @@ let $out_number = to_char(#tValue)
 ! I'm pretty confident about these values... so I will let them pass.
 ! Anything outside of this range should be examined.  Will remove this
 ! section if I ever get a better understanding of these numbers
-if #tValue < 0 or #tValue > 20010
+if #tValue < 0 or #tValue > 99999999
    show ''
    show '**************'
    show 'New Legacy Number found'
@@ -1337,6 +1372,9 @@ evaluate #ToolsRel
       break
    when < 9
       let $ToolsRel = '8.4'
+      break
+   when-other
+      let $ToolsRel = 'unknown'
       break
 end-evaluate
 
@@ -1746,6 +1784,9 @@ evaluate $in
     break
   when = '78'
     let $out = 'Step'
+    break
+  when = '87'
+    let $out = 'Message Subscription'
     break
   when = '104'
     let $out = 'Application Package'

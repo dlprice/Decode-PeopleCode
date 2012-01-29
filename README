@@ -2,10 +2,3 @@ This program was designed as a learning experiment to help me understand
 better how PeopleSoft stored PeopleCode.  The only table that it INSERTs into
 or DELETEs from is DLP_PCODE (which it will create if not found).
 
-TO DO / KNOWN ISSUES:
- * There are still only a very little bit of indenting logic.  Mostly just
-   playing around trying to find out what works.  Most likely it needs to be
-   removed and a new approach used.
- * There are still several instances where line feeds aren't correct.  Such
-   as where semi-colons are options (single statement 'if' blocks)
- * Spacing is fairly good.  Semi-colons sometimes get an extra space before them.
