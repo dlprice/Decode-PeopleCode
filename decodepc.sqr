@@ -44,6 +44,8 @@
 ! 11-04-2011   Changes to indention logic.
 !              Added two more commands per user request: 0x70 (interface) & 0x71 (end-interface)
 !              Added 0x6c (Data Type)
+! 03-13-2012   8.52 changed PSPCMPROG from a LONG RAW to a BLOB.  Need to remove
+!              function to convert LONG RAW to BLOB.
 !              
 !
 !*******************************************************************************
@@ -66,7 +68,7 @@ do Init-Report
 ! Initialize Settings
 let #Output_To_File = {TRUE}
 let #Skip_If_Exists = {TRUE}
-let $Output_Directory = 'c:\pcode\'
+let $Output_Directory = 'c:\temp\'
 
 
 begin-select distinct
@@ -151,7 +153,7 @@ OBJECTVALUE7
    end-if
 
 from pspcmprog
-! where lastupdoprid <> 'PPLSOFT'          ! All custom or customized PeopleCode
+where lastupdoprid <> 'PPLSOFT'          ! All custom or customized PeopleCode
 order by 1,2,3,4,5,6,7
 end-select
 
@@ -193,26 +195,26 @@ evaluate $sqr-database
       show ' '
       show '= = = = = = = = = E R R O R = = = = = = = = ='
       show ' '
-      show 'Sorry.  Decode PeopleCode has currently'
+      show 'Sorry.  Decode PeopleCode currently'
       show 'only works on Oracle.'
       show ' '
       show '= = = = = = = = = = = = = = = = = = = = = = ='
       stop quiet
 end-evaluate
 
-evaluate $ToolsRel
-   when = '8.4'
-      break
-   when-other
-      show ' '
-      show '= = = = = = = = = E R R O R = = = = = = = = ='
-      show ' '
-      show 'Sorry.  Decode PeopleCode currently'
-      show 'only works on PeopleTools version 8.1x or 8.4x. '
-      show ' '
-      show '= = = = = = = = = = = = = = = = = = = = = = ='
-      stop quiet
-end-evaluate
+!evaluate $ToolsRel
+!   when = '8.4'
+!      break
+!   when-other
+!      show ' '
+!      show '= = = = = = = = = E R R O R = = = = = = = = ='
+!      show ' '
+!      show 'Sorry.  Decode PeopleCode currently only'
+!      show 'works on PeopleTools versions 8.4 or newer '
+!      show ' '
+!      show '= = = = = = = = = = = = = = = = = = = = = = ='
+!      stop quiet
+!end-evaluate
 
 
 end-procedure
@@ -953,9 +955,15 @@ begin-sql on-error=Build-Temp-Table
 delete from DLP_PCODE
 end-sql
 
+if to_number($ToolsRel) >= 8.52
+  let $progtxt = 'progtxt'
+else
+  let $progtxt = 'to_lob(progtxt)'
+end-if
+
 begin-sql
 INSERT INTO dlp_pcode (progseq, progtxt)
-SELECT progseq, to_lob(progtxt)
+SELECT progseq, [$progtxt]
 FROM pspcmprog
 WHERE [$WhereClause];
 end-sql
@@ -1355,28 +1363,6 @@ from [$ToolsVersionTable]
 end-select
 end-if
 
-let #ToolsRel = to_number($ToolsRel)
-
-evaluate #ToolsRel
-   when < 7
-      let $ToolsRel = 'pre-7'
-      break
-   when < 7.5
-      let $ToolsRel = '7'
-      break
-   when < 8
-      let $ToolsRel = '7.5'
-      break
-   when < 8.4
-      let $ToolsRel = '8'
-      break
-   when < 9
-      let $ToolsRel = '8.4'
-      break
-   when-other
-      let $ToolsRel = 'unknown'
-      break
-end-evaluate
 
 end-procedure
 
