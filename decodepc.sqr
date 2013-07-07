@@ -1,5 +1,6 @@
 !*******************************************************************************
 !  Program:     DECODEPC.SQR
+!  Url:         https://github.com/dlprice/Decode-PeopleCode
 !*******************************************************************************
 !
 !  Programmer:  David L. Price
@@ -7,8 +8,7 @@
 !*******************************************************************************
 !
 ! This program was designed as a learning experiment to help me understand
-! better how PeopleSoft stored PeopleCode.  The only table that it INSERTs into
-! or DELETEs from is DLP_PCODE (which it will create if not found).
+! better how PeopleSoft stored PeopleCode.
 !
 ! TO DO / KNOWN ISSUES:
 ! * Indenting is still a work in progress
@@ -33,11 +33,11 @@
 ! 06-15-2011   Updated Comment commands to handle longs comments (by calling
 !              LineFeed when 0x0a is encountered), added new commands
 ! 09-20-2011   Fixed a bunch of stupid spelling mistakes (mostly in comments)
-! 10-01-2011   Minor improvements to indention. 
-!              Removed <brk>.  
-!              Remove prompting and interactive sessions to optimize writing 
-!              several PeopleCode objects to file in a row.  You now need to 
-!              modify the WHERE clause to adjust output.  
+! 10-01-2011   Minor improvements to indention.
+!              Removed <brk>.
+!              Remove prompting and interactive sessions to optimize writing
+!              several PeopleCode objects to file in a row.  You now need to
+!              modify the WHERE clause to adjust output.
 !              Added ability to skip writing file if it already exists (on by default)
 !              Added some additional commands found in 8.51 (implements)
 !              Strips invalid characters from filename
@@ -46,7 +46,9 @@
 !              Added 0x6c (Data Type)
 ! 03-13-2012   8.52 changed PSPCMPROG from a LONG RAW to a BLOB.  Need to remove
 !              function to convert LONG RAW to BLOB.
-!              
+! 06-21-2013   Removed dependency on DLP_PCODE table.  CLOBs are much easier to
+!              work with than LONG RAW.  Probably will break all backward
+!              compatibility.  Min PeopleTools version likely: 8.52
 !
 !*******************************************************************************
 
@@ -68,8 +70,7 @@ do Init-Report
 ! Initialize Settings
 let #Output_To_File = {TRUE}
 let #Skip_If_Exists = {TRUE}
-let $Output_Directory = 'c:\temp\'
-
+let $Output_Directory = 'c:\temp\stage\'
 
 begin-select distinct
 OBJECTVALUE1
@@ -79,7 +80,7 @@ OBJECTVALUE4
 OBJECTVALUE5
 OBJECTVALUE6
 OBJECTVALUE7
-  
+
    let $WhereClause = 'OBJECTVALUE1 = ''' || &ObjectValue1 || ''' and ' ||
                       'OBJECTVALUE2 = ''' || &ObjectValue2 || ''' and ' ||
                       'OBJECTVALUE3 = ''' || &ObjectValue3 || ''' and ' ||
@@ -102,48 +103,44 @@ OBJECTVALUE7
 
    let $Indent    = '' ! +: Add one level, -: Remove one level, 0: Reset to zero
    let #Indent    = 0
-                           
+
    if #Output_To_File
       do Open-File
    end-if
-    
+
    if not (#Output_To_File and #Skip_File)
-                           
+
       let #Program_Segment = 0
       let #Program_Slice   = -1
-      do Stage-PeopleCode
-                      
-      if #Rows_Returned > 0
-    
-         ! Get rid of first 37 bytes.  PeopleCode header information.
-         ! We might do something with this later.
-         let #i = 0
-         while #i < 37
-            do NextByte(#tVal)
-            ! show #tVal edit 099 noline
-            ! show ' ' noline
-            add 1 to #i
-         end-while
-      
-         ! Program starts at byte 38
+
+      ! Get rid of first 37 bytes.  PeopleCode header information.
+      ! We might do something with this later.
+      let #i = 0
+      while #i < 37
          do NextByte(#tVal)
-         while not #end-file
-            let $SBefore = 'N'
-            !let $SAfter  = 'N'
-            ! 'Y' - Space Required
-            ! 'N' - Space Not Required
-            ! 'P' - Space Required, except next to punctuation: ().,;
-      
-            do Evaluate-Return-Value
-            if #EndOfCode
-               break
-            end-if
-      
-            do NextByte(#tVal)
-         end-while
-         do LineFeed
-      end-if
-       
+         ! show #tVal edit 099 noline
+         ! show ' ' noline
+         add 1 to #i
+      end-while
+
+      ! Program starts at byte 38
+      do NextByte(#tVal)
+      while not #end-file
+         let $SBefore = 'N'
+         !let $SAfter  = 'N'
+         ! 'Y' - Space Required
+         ! 'N' - Space Not Required
+         ! 'P' - Space Required, except next to punctuation: ().,;
+
+         do Evaluate-Return-Value
+         if #EndOfCode
+            break
+         end-if
+
+         do NextByte(#tVal)
+      end-while
+      do LineFeed
+
    else
       show '   - Skipped'
    end-if
@@ -156,7 +153,6 @@ from pspcmprog
 where lastupdoprid <> 'PPLSOFT'          ! All custom or customized PeopleCode
 order by 1,2,3,4,5,6,7
 end-select
-
 
 end-program
 
@@ -202,20 +198,6 @@ evaluate $sqr-database
       stop quiet
 end-evaluate
 
-!evaluate $ToolsRel
-!   when = '8.4'
-!      break
-!   when-other
-!      show ' '
-!      show '= = = = = = = = = E R R O R = = = = = = = = ='
-!      show ' '
-!      show 'Sorry.  Decode PeopleCode currently only'
-!      show 'works on PeopleTools versions 8.4 or newer '
-!      show ' '
-!      show '= = = = = = = = = = = = = = = = = = = = = = ='
-!      stop quiet
-!end-evaluate
-
 
 end-procedure
 
@@ -257,10 +239,10 @@ end-procedure
 !*******************************************************************************
 begin-procedure Evaluate-Return-Value
 !*******************************************************************************
-! This list is not conclusive.  There are still many gaps.  I can only assume
+! This list is not conclusive.  There are still gaps.  I can only assume
 ! that every number has a meaning... but some of these could be for obsolete
-! commands and so no longer used.  Currently the will stop when it encounters an
-! unrecognized code.
+! commands and so no longer used.  Currently the program will stop when it
+! encounters an unrecognized code.
 
 ! Currently the pssqr.ini file delivered by PeopleSoft only allows for 75 breaks.
 ! This, of course, could be increased, but to keep this as universally usable as
@@ -521,7 +503,7 @@ if #tVal <= 60
       when = 45  ! 0x2d
           ! Code Section Separator.  Not sure exactly what this is for,
           ! so I am writing it out to maybe be able to spot a pattern
-          !do WriteCode('<brk>')
+          ! do WriteCode('<brk>')
           ! do WriteCode('=====================================================================================')
           do LineFeed
           break
@@ -606,10 +588,10 @@ if #tVal <= 60
           stop
           break
    end-evaluate
-    
+
 else  ! #tVal >= 61
 
-    evaluate #tVal   
+    evaluate #tVal
        when = 61  ! 0x3d
            let $SBefore = 'Y'
            do WriteCode('When')
@@ -709,7 +691,7 @@ else  ! #tVal >= 61
            do NextByte(#lCommentLength1)
            do NextByte(#lCommentLength2)
            let #lCommentLength = (#lCommentLength2 * 256) + #lCommentLength1
-   
+
            let #i = 0
            while #i < #lCommentLength
               do NextByte(#tVal)
@@ -747,7 +729,7 @@ else  ! #tVal >= 61
            do NextByte(#lCommentLength1)
            do NextByte(#lCommentLength2)
            let #lCommentLength = (#lCommentLength2 * 256) + #lCommentLength1
-   
+
            let #i = 0
            while #i < #lCommentLength
               do NextByte(#tVal)
@@ -880,7 +862,7 @@ else  ! #tVal >= 61
            do Get-String($tString)
            do WriteCode($tString)
            let $SAfter = 'Y'
-           break           
+           break
        when = 109 ! 0x6d
            let $SBefore = 'Y'
            do WriteCode('/+ ')
@@ -935,67 +917,6 @@ end-if
 end-procedure
 
 !*******************************************************************************
-begin-procedure Stage-PeopleCode
-!*******************************************************************************
-! PeopleSoft stores PeopleCode in a LONG RAW field.  Each field can only hold
-! 24000 bytes of code.  If the PeopleCode is longer than 24000 bytes, it will
-! be split up in multiple rows, indexed by the PROGSEQ field.
-!
-! When reading a LONG RAW field, SQR translates the binary data into text
-! representing the hex values.  However, SQR starts choking when the data gets
-! too big.  It seemed that the only hope I had was to deal with it in manageable
-! size chunks, how I was unable to find any Oracle / SQR tricks to returns only a
-! substring of the LONG RAW field.  BLOBs were easier to work with, but I could
-! still not find a way to translate the LONG RAW into a BLOG on the fly.  My
-! solution was to create a temp table (if it didn't already exists), and copy
-! the LONG RAW into a BLOB field there, converting it using the to_lob function.
-! Now I can use the dbms_lob functions to return 2000 byte chunks.
-
-begin-sql on-error=Build-Temp-Table
-delete from DLP_PCODE
-end-sql
-
-if to_number($ToolsRel) >= 8.52
-  let $progtxt = 'progtxt'
-else
-  let $progtxt = 'to_lob(progtxt)'
-end-if
-
-begin-sql
-INSERT INTO dlp_pcode (progseq, progtxt)
-SELECT progseq, [$progtxt]
-FROM pspcmprog
-WHERE [$WhereClause];
-end-sql
-
-let #Rows_Returned = #sql-Count
-
-if #Rows_Returned = 0
-  show '*** No program found ***'
-  show ' '
-  ! stop
-end-if
-
-Commit
-
-end-procedure
-
-!*******************************************************************************
-begin-procedure Build-Temp-Table
-!*******************************************************************************
-! Assumes the PTTBL tablespace exists.  This can be changed to whatever.
-
-begin-sql
-CREATE TABLE DLP_PCODE (
-  PROGSEQ INTEGER,
-  PROGTXT blob)  tablespace pttbl
-  STORAGE (INITIAL 10000 NEXT 100000 MAXEXTENTS UNLIMITED PCTINCREASE 0)
-  PCTFREE 10 PCTUSED 80;
-end-sql
-
-end-procedure
-
-!*******************************************************************************
 begin-procedure NextByte (:#tVal)
 !*******************************************************************************
 ! Pulls off the first two characters from the $Code string that represent a
@@ -1025,10 +946,6 @@ begin-procedure Get-Next-Segment (:$inCode)
 
 add 1 to #_Program_Slice
 
-! This is so that SQR doesn't complain if the table doesn't exist yet.
-! Procedure Build-Temp-Table will build the table if it doesn't exist.
-let $DLP_PCODE = 'DLP_PCODE'
-
 let $inCode = ''
 let #offset = ({SLICE_SIZE} * #_Program_Slice) + 1
 
@@ -1038,8 +955,9 @@ Dbms_Lob.SubStr(PROGTXT,{SLICE_SIZE},#offset) &PROGTXT
 
    let $inCode = &PROGTXT
 
-FROM [$DLP_PCODE]
-WHERE PROGSEQ = #_Program_Segment
+FROM PSPCMPROG
+WHERE [$_WhereClause]
+AND PROGSEQ = #_Program_Segment
 end-select
 
 if isnull(&PROGSEQ)
@@ -1087,11 +1005,11 @@ end-evaluate
 end-procedure
 
 !*******************************************************************************
-begin-procedure SetIndent($inChar) 
+begin-procedure SetIndent($inChar)
 !*******************************************************************************
 ! Rudimentary Indenting logic.  Probably will expand later.
 
-if $_Indent <> '0' 
+if $_Indent <> '0'
   let $_Indent = $inChar
 end-if
 
@@ -1106,7 +1024,7 @@ begin-procedure WriteCode($inChar)
 !
 ! 'Y' : Make sure a space exists before/after code item
 ! 'N' : Do not add space before/after code item
-! 'P' : Make sure a space exists before/after code item, unless between punctuation 
+! 'P' : Make sure a space exists before/after code item, unless between punctuation
 
 let $LastChar = substr($_CodeLine,length($_CodeLine),1)
 
@@ -1137,7 +1055,6 @@ begin-procedure LineFeed
 !   '-+': Remove indention level, then add to next line
 !   Note: only one indention level can exist
 !
-
 
 if $Indent = '-' or $Indent = '-+'
    subtract {INDENT_SIZE} from #Indent
@@ -1270,7 +1187,7 @@ end-if
 ! values after the decimal.  Not sure that happens often.
 do NextByte(#Decimal)
 
-! Skipping fourth byte... not sure what it is for. 
+! Skipping fourth byte... not sure what it is for.
 do NextByte(#tVal)
 if #tVal <> 0
    show ''
