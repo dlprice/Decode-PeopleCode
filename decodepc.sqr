@@ -49,6 +49,7 @@
 ! 06-21-2013   Removed dependency on DLP_PCODE table.  CLOBs are much easier to
 !              work with than LONG RAW.  Probably will break all backward
 !              compatibility.  Min PeopleTools version likely: 8.52
+! 07-18-2014   Added 0x52 (Doc) command
 !
 !*******************************************************************************
 
@@ -717,6 +718,11 @@ else  ! #tVal >= 61
        when = 81  ! 0x51
            let $SBefore = 'Y'
            do WriteCode('PanelGroup')
+           let $SAfter = 'Y'
+           break
+       when = 83  ! 0x52
+           let $SBefore = 'Y'
+           do WriteCode('Doc')
            let $SAfter = 'Y'
            break
        when = 84  ! 0x54
@@ -1469,10 +1475,10 @@ show '================'
 show 'Interactive Mode'
 show '================'
 
-let $WhereClause = ''
-let $ObjectMask  = ''
+let $WhereClause     = ''
+let $ObjectMask      = ''
 let $Current_ID_Type = ''
-let $ObjectName = ''
+let $ObjectName      = ''
 clear-array name=WhereClause
 
 let #i = 1
