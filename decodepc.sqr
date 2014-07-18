@@ -31,7 +31,7 @@
 !              Made changes to the evaluate to handle the large number of breaks.
 !              Updated Legacy Number logic to better handle decimals.
 ! 06-15-2011   Updated Comment commands to handle longs comments (by calling
-!              LineFeed when 0x0a is encountered), added new commands
+!              LineFeed whe n 0x0a is encountered), added new commands
 ! 09-20-2011   Fixed a bunch of stupid spelling mistakes (mostly in comments)
 ! 10-01-2011   Minor improvements to indention.
 !              Removed <brk>.
